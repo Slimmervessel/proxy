@@ -1,41 +1,55 @@
+// server.js
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const cors = require('cors');
+
 const app = express();
-const PORT = 3000;
+app.use(cors());               // Allow cross-origin requests
+app.disable('x-powered-by');   // Hide Express signature in headers
 
-// CORS Headers for browser compatibility
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', '*');
-  res.header('Access-Control-Allow-Methods', '*');
-  next();
-});
-
-// Proxy route
+// Proxy all requests to /proxy
 app.use('/proxy', createProxyMiddleware({
-  target: 'https://example.com', // dummy; we'll rewrite the target dynamically
   changeOrigin: true,
-  pathRewrite: (path, req) => {
-    const url = req.query.url;
-    return new URL(url).pathname + new URL(url).search;
+  selfHandleResponse: true,  // Allows you to modify response headers
+  onProxyReq: (proxyReq, req, res) => {
+    // Optional: remove or modify headers before sending request to target
+    proxyReq.removeHeader('referer');
+    proxyReq.removeHeader('origin');
+  },
+  onProxyRes: async (proxyRes, req, res) => {
+    let body = [];
+
+    proxyRes.on('data', chunk => body.push(chunk));
+    proxyRes.on('end', () => {
+      // Concatenate and forward response
+      const content = Buffer.concat(body);
+
+      // Remove headers that prevent embedding
+      res.removeHeader('X-Frame-Options');
+      res.removeHeader('Content-Security-Policy');
+
+      // Copy remaining headers
+      Object.entries(proxyRes.headers).forEach(([key, value]) => {
+        if (!['content-length','x-frame-options','content-security-policy'].includes(key.toLowerCase())) {
+          res.setHeader(key, value);
+        }
+      });
+
+      res.send(content);
+    });
   },
   router: (req) => {
-    const url = req.query.url;
-    const target = new URL(url);
-    return `${target.protocol}//${target.host}`;
+    // Extract and route to requested URL
+    const targetUrl = req.query.url;
+    return new URL(targetUrl).origin;
   },
-  onProxyReq: (proxyReq, req, res) => {
-    // remove headers that may block iframe use
-    proxyReq.removeHeader('origin');
-    proxyReq.removeHeader('referer');
-  },
-  onProxyRes: (proxyRes, req, res) => {
-    // remove headers that block iframing
-    delete proxyRes.headers['x-frame-options'];
-    delete proxyRes.headers['content-security-policy'];
+  pathRewrite: (path, req) => {
+    const targetUrl = new URL(req.query.url);
+    return targetUrl.pathname + targetUrl.search;
   }
 }));
 
-app.listen(PORT, () => {
-  console.log(`🌐 Proxy server running at http://localhost:${PORT}`);
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Proxy server listening on port ${port}`);
 });
